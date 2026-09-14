@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "description": "Smoke cases only; full workload and performance targets are pending",
+  "cases": [
+    {"case_id": "aligned_fp16", "shape": [64, 128], "weight1_shape": [256, 128], "weight2_shape": [64, 256], "dtype": "float16", "layout": "linear", "seed": 0},
+    {"case_id": "tails_bf16", "shape": [2, 3, 31], "weight1_shape": [193, 31], "weight2_shape": [33, 193], "dtype": "bfloat16", "layout": "linear", "seed": 1, "noncontiguous": true},
+    {"case_id": "rank8_fp16", "shape": [1, 1, 1, 1, 1, 2, 3, 17], "weight1_shape": [65, 17], "weight2_shape": [19, 65], "dtype": "float16", "layout": "linear", "seed": 2}
+  ]
+}

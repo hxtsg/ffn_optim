@@ -1,3 +1,7 @@
 *.csv
 *.log
-
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+results/

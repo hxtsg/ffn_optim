@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffn-optim"
+version = "0.1.0"
+description = "Single-launch FFN composition and explicit implementation search for Ascend950"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1"]
+
+[tool.setuptools.packages.find]
+include = ["ops*", "common*", "validation*", "performance*"]
+exclude = ["3rdparty*", "ref*", "spec*"]
+
+[project.scripts]
+ffn-benchmark = "performance.run:main"
