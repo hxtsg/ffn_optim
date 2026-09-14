@@ -5,6 +5,14 @@ from math import prod
 
 @dataclass(frozen=True)
 class Problem:
+    """功能：保存FFN的逻辑形状及类型，不持有Tensor或执行计算
+
+    输入：input_shape为2～8维正整数形状，m为前导维乘积，k为最后一维
+    h/n分别为隐藏/输出宽度，dtype为float16或bfloat16，layout为linear
+    应由problem_from_shapes创建以校验维度关系和范围，直接构造不做校验
+    输出：只读问题描述；output_shape返回(*input_shape[:-1], n)
+    """
+
     input_shape: tuple[int, ...]
     m: int
     k: int

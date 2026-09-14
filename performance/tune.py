@@ -14,7 +14,8 @@ def search(configurations, evaluate, checkpoint=None):
     best = {'configuration': None, 'device_median_us': None, 'complete': False,
             'ranking_metric': 'unprofiled_device_event_median_us',
             'scope': configurations}
-    for configuration in configurations:
+    for index, configuration in enumerate(configurations, start=1):
+        print(f'[搜索] 当前搜索第{index}个配置：{configuration}', flush=True)
         row = dict(evaluate(configuration), configuration=configuration)
         records.append(row)
         value = row.get('device_median_us')

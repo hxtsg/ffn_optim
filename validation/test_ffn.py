@@ -22,6 +22,12 @@ def compare(output, golden):
 
 
 class InputTests(unittest.TestCase):
+    """功能：验证输入契约、非连续输入补零、形状恢复和非法输入拒绝
+
+    输入：由unittest选择测试方法，方法内部生成CPU Tensor及边界shape，无需外部case
+    输出：断言结果汇入unittest报告，不返回算子结果，也不执行NPU
+    """
+
     def test_ranks_and_padding(self):
         import torch
         from ops.host.inputs import validate_tensors, prepare_storage
@@ -69,6 +75,12 @@ class InputTests(unittest.TestCase):
 
 
 class MetricTests(unittest.TestCase):
+    """功能：验证误差判定、NaN/Inf拒绝及有理式GELU近似
+
+    输入：由unittest选择测试方法，内部构造CPU Tensor及torch参考结果
+    输出：断言结果汇入unittest报告；这些测试不代表设备数值精度已通过
+    """
+
     def test_bad_results(self):
         import torch
         a = torch.ones(2, 3).half()
@@ -85,13 +97,24 @@ class MetricTests(unittest.TestCase):
 
 
 class CompositionTests(unittest.TestCase):
-    def test_generated_gelu_expression(self):
-        """Evaluate the actual generated arithmetic AST on CPU, not a device emulator."""
+    """功能：检查两条直接Kernel路径的结构、阶段同步位置、GELU表达式和策略限制
+
+    输入：由unittest选择测试方法，需要固定且未修改的CATLASS子模块及CPU torch
+    输出：AST结构和CPU算术断言结果，不编译DSL，不验证设备同步或死锁行为
+    """
+
+    def _kernel_ast(self, kind):
+        from ops.host.dispatch import read_kernel_source
+        source, provenance = read_kernel_source(kind)
+        return next(n for n in ast.parse(source).body
+                    if isinstance(n, ast.FunctionDef) and n.name == provenance['entry_point'])
+
+    def test_direct_gelu_expression(self):
+        """Evaluate actual kernel arithmetic on CPU, not a device emulator."""
         import torch
         from types import SimpleNamespace
-        from ops.kernel.ffn import generate_source
         from validation.reference import gelu_rational
-        tree = ast.parse(generate_source()[0])
+        tree = self._kernel_ast('basic')
         assignments = {n.targets[0].id: n for n in ast.walk(tree)
                        if isinstance(n, ast.Assign) and len(n.targets) == 1
                        and isinstance(n.targets[0], ast.Name) and n.targets[0].id == 'z'}
@@ -110,24 +133,27 @@ class CompositionTests(unittest.TestCase):
         torch.testing.assert_close(namespace['y'], gelu_rational(x), rtol=0, atol=0)
 
     def test_one_kernel_and_regions(self):
-        from ops.kernel.ffn import generate_source
+        from ops.host.dispatch import read_kernel_source
         for kind in ('basic', 'streamk'):
-            source, provenance = generate_source(kind)
+            source, provenance = read_kernel_source(kind)
             tree = ast.parse(source)
             kernels = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
-            self.assertEqual(len(kernels), 1)
-            regions = [n.items[0].context_expr.func.attr for n in kernels[0].body
+            self.assertEqual(len(kernels), 2)
+            selected = self._kernel_ast(kind)
+            self.assertEqual(ast.unparse(selected.decorator_list[0]), 'tla.kernel')
+            regions = [n.items[0].context_expr.func.attr for n in selected.body
                        if isinstance(n, ast.With)]
             self.assertEqual(regions, ['cube', 'vector'])
-            self.assertEqual(provenance['up_output_copy_adaptations'], 1)
             self.assertNotIn('torch', source)
             self.assertNotIn('CAST_FLOOR', source)
             self.assertNotIn('basic_mmad_kernel(', source)
+            for forbidden in ('ast.parse', 'ast.unparse', 'exec(', 'generate_source', 'linecache'):
+                self.assertNotIn(forbidden, source)
+            self.assertEqual(provenance['entry_point'], selected.name)
 
     def test_stage_barrier_unconditional_and_ordered(self):
-        from ops.kernel.ffn import generate_source
         for kind in ('basic', 'streamk'):
-            fn = ast.parse(generate_source(kind)[0]).body[0]
+            fn = self._kernel_ast(kind)
             regions = [n for n in fn.body if isinstance(n, ast.With)]
             def calls(region):
                 return [ast.unparse(n) for n in region.body if isinstance(n, ast.Expr)]
@@ -141,7 +167,7 @@ class CompositionTests(unittest.TestCase):
             self.assertIn('tla.cross_core_set_flag(up_ready, tla.arch.MTE3)', vector)
             self.assertIn('tla.cross_core_wait_flag(down_release, tla.arch.MTE2)', vector)
             # Presence at region top-level includes no-tile cores and both AIVs
-            self.assertEqual(generate_source(kind)[0], generate_source(kind)[0])
+            self.assertEqual(ast.dump(self._kernel_ast(kind)), ast.dump(fn))
 
     def test_selection(self):
         from ops.host.dispatch import Selection, DependencyUnavailable, NotApplicable
@@ -158,6 +184,12 @@ class CompositionTests(unittest.TestCase):
 
 
 class SearchTests(unittest.TestCase):
+    """功能：验证候选搜索、失败过滤、最优筛选和中断checkpoint逻辑
+
+    输入：由unittest选择测试方法，内部提供模拟配置、状态和耗时，不调用真实算子
+    输出：断言结果汇入unittest报告；模拟耗时不作为性能测试结果
+    """
+
     def test_best_and_failure_filter(self):
         from performance.tune import search
         configs = [{'down_impl': k} for k in ('basic', 'streamk', 'full_load_a')]
@@ -198,6 +230,12 @@ class SearchTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    """功能：验证profiler字段提取、缺失指标处理及默认CLI不启用NPU
+
+    输入：由unittest选择测试方法，需要可读的默认case及子模块，并允许创建临时目录和CPU子进程
+    输出：临时报告和断言结果，临时目录退出时清理；不采集真实设备性能
+    """
+
     def test_summary_keeps_units_and_ignores_other_ops(self):
         import tempfile
         from pathlib import Path
@@ -205,7 +243,7 @@ class ReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'op_summary_0.csv'
             path.write_text('Op Name,Task Duration(us),aic_cube_ratio,aic_mte2_time(us)\n'
-                            'ffn_kernel,10,0.7,4\nother,500,1,2\nffn_kernel,12,0.9,8\n')
+                            'ffn_basic_gelu_basic_kernel,10,0.7,4\nother,500,1,2\nffn_basic_gelu_basic_kernel,12,0.9,8\n')
             metrics = extract_summary(directory)
             self.assertEqual(metrics['task_duration_us'], 11)
             self.assertAlmostEqual(metrics['pipeline_utilization']['aic_cube_ratio'], 0.8)
@@ -233,14 +271,60 @@ main(['--mode', 'search', '--output-root', sys.argv[1]])
 assert not any(n.startswith(('torch_npu', 'catlass')) for n in sys.modules)
 '''
         with tempfile.TemporaryDirectory() as directory:
-            subprocess.run([sys.executable, '-c', script, directory], cwd=ROOT,
-                           capture_output=True, text=True, check=True)
+            result = subprocess.run([sys.executable, '-c', script, directory], cwd=ROOT,
+                                    capture_output=True, text=True, check=True)
+            for message in ('case 1/3', 'case 2/3', 'case 3/3', '配置 1/4',
+                            'dry-run：跳过CPU golden', 'Tiling检查完成',
+                            '配置评估结束', '全部case处理完成'):
+                self.assertIn(message, result.stdout)
+            self.assertNotIn('进入CPU golden计算阶段', result.stdout)
+            self.assertNotIn('进入NPU计算阶段', result.stdout)
             run = next(Path(directory).iterdir())
             rows = json.loads((run / 'accuracy.json').read_text())
             self.assertEqual(len(rows), 12)
             self.assertFalse(json.loads((run / 'manifest.json').read_text())['device_executed'])
             best = json.loads((run / 'best_configs.json').read_text())
             self.assertTrue(all(value['configuration'] is None for value in best.values()))
+
+    def test_runner_has_no_nested_functions(self):
+        from pathlib import Path
+        from ops.host.dispatch import ROOT
+        tree = ast.parse((ROOT / 'performance/run.py').read_text())
+        runner = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                      and n.name == 'PerformanceRunner')
+        self.assertTrue(all(word in ast.get_docstring(runner) for word in ('功能', '输入', '输出')))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                self.assertFalse(any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                     for stmt in node.body for child in ast.walk(stmt)), node.name)
+        for method in runner.body:
+            if isinstance(method, ast.FunctionDef):
+                self.assertTrue(ast.get_docstring(method), method.name)
+
+    def test_runner_saves_case_preparation_interruption(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from unittest.mock import patch
+        from ops.host.dispatch import ROOT
+        from performance.run import PerformanceRunner, parser
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = PerformanceRunner(parser().parse_args([
+                '--cases', str(ROOT / 'configs/v1_cases.json'), '--output-root', directory]))
+            with patch.object(runner, 'prepare_case', side_effect=KeyboardInterrupt()), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(KeyboardInterrupt):
+                    runner.run()
+            info = json.loads((runner.root / 'manifest.json').read_text())
+            bests = json.loads((runner.root / 'best_configs.json').read_text())
+            self.assertFalse(info['complete'])
+            self.assertFalse(info['device_executed'])
+            self.assertFalse(bests[runner.cases[0]['case_id']]['complete'])
+            self.assertIn('运行中断或失败', output.getvalue())
+            with self.assertRaises(RuntimeError):
+                runner.run()
 
 
 if __name__ == '__main__':

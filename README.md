@@ -49,12 +49,18 @@ MatMul直接取自子模块`python/tla_dsl/examples/end_to_end/`
 - mixed组织参考：`basic_mixed/basic_mixed_ub2l1.py`
 - L0C→UB单AIV通路参考：`basic_mixed/basic_mixed_fixpipe_nz2dn.py`
 
-上述样例是独立Kernel，不是可直接嵌入的设备函数，所以`ffn.py`在CPU侧读取其AST，提取设备区域并重命名局部变量和flag，再生成唯一FFN入口
-不调用样例Host函数，不复制维护一套MatMul算法，不修改子模块
+`ops/kernel/ffn.py`直接展开两个普通的`@tla.kernel`函数
+
+- `ffn_basic_gelu_basic_kernel`：Basic上投影＋GELU＋Basic下投影
+- `ffn_basic_gelu_streamk_kernel`：Basic上投影＋GELU＋Stream-K下投影
+
+MatMul主体按上述固定版本样例移植展开，不重新设计MatMul算法，不调用样例Host入口，不修改子模块
+Host在`ops/host/dispatch.py`根据down_impl选择一个函数并编译，单次run仍只下发一个artifact
+不再使用源码字符串、AST改写、exec或动态拼装Kernel；两个函数中GELU、缓冲和同步均直接可读
 
 适配仅包括：参数映射、局部缓冲/flag隔离、将上投影最终GM写回替换为L0C→UB、增加GELU和阶段同步，以及将Stream-K归约FP16输出的FLOOR转换改为ROUND
-生成时检查固定提交、tracked修改和输出写回锚点，任一不匹配即失败；生成源码与源文件SHA256写入结果目录供审查
-生成代码保留CATLASS版权头，相关派生部分遵循子模块`LICENSE`中的CANN Open Software License Agreement Version 2.0
+编译前检查固定提交和子模块tracked修改；报告保存完整ffn.py源码快照、SHA256和选中的入口名，不再生成设备源码
+移植代码保留CATLASS版权头，相关派生部分遵循子模块`LICENSE`中的CANN Open Software License Agreement Version 2.0
 
 ## Kernel计算与同步
 
@@ -95,7 +101,7 @@ python -m compileall -q common ops validation performance
 git diff --check
 ```
 
-dry-run只生成参数计划、源码和适用性结果，不编译DSL、不创建NPU Tensor、不填性能数字、不生成虚假的最优配置
+dry-run只生成参数计划、保存现有源码快照及适用性结果，不编译DSL、不创建NPU Tensor、不填性能数字、不生成虚假的最优配置
 配置文件目前只有3个smoke case，不是case全集
 
 本轮检查记录：2026-09-12，Python3.12.14、torch2.14.0，17项CPU测试通过，20个Python文件AST及新增文件空白检查通过
@@ -137,7 +143,7 @@ y = prepared.run()
 
 ## 结果与验收边界
 
-每次运行创建`results/<run_id>/`，含manifest.json、accuracy.json、performance.csv、best_configs.json、生成源码、profiler/和analysis.md，不覆盖历史运行
+每次运行创建`results/<run_id>/`，含manifest.json、accuracy.json、performance.csv、best_configs.json、ffn_source_snapshot.py、profiler/和analysis.md，不覆盖历史运行
 搜索逐候选checkpoint；编译失败、精度失败及不适用均保留原因；设备准备/运行异常中止搜索，避免在可能异常的设备上下文继续下发
 
 - `compile_wall_ms`单列编译；`auxiliary_device_interval_ms`记录连续化、分配和补零所在设备区间，不冒充单个辅助task时长

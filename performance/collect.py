@@ -5,15 +5,20 @@ import math
 from pathlib import Path
 
 
-def time_prepared(prepared, warmup=5, repeats=20):
+def time_prepared(prepared, warmup=5, repeats=20, *, progress=None):
+    """预热后测量设备Event耗时，返回计时字典；可选progress接收阶段消息，不在计时区间调用"""
     if warmup < 0 or repeats < 1:
         raise ValueError('warmup >= 0 and repeats >= 1 required')
     import torch
     device = prepared.storage[0].device
     with torch.npu.device(device):
+        if progress is not None:
+            progress(f'进入NPU预热阶段：{warmup}次')
         for _ in range(warmup):
             prepared.run()
         torch.npu.synchronize(device)
+        if progress is not None:
+            progress(f'NPU预热完成，进入设备计时阶段：{repeats}次')
         samples = []
         for _ in range(repeats):
             start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
@@ -67,7 +72,7 @@ def capture_profile(prepared, directory):
     return {'profiler_path': str(directory), 'profiler_note': metric_note}
 
 
-def extract_summary(directory, kernel_name='ffn_kernel'):
+def extract_summary(directory, kernel_name='ffn_basic_gelu_'):
     """Extract only explicitly labelled task/us and pipeline ratios from op_summary.
 
     Export header names/units are preserved. Unknown schemas stay unavailable.
@@ -103,7 +108,7 @@ def extract_summary(directory, kernel_name='ffn_kernel'):
             'summary_note': 'Medians of matching FFN rows; pipeline header units preserved, no inferred metrics'}
 
 
-def extract_task_duration(trace_path, kernel_name='ffn_kernel'):
+def extract_task_duration(trace_path, kernel_name='ffn_basic_gelu_'):
     """Read Chrome trace device events only; do not mistake Host API time for task time."""
     import json
     data = json.loads(Path(trace_path).read_text())

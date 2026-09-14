@@ -7,11 +7,25 @@ from ops.host.tiling import make_plan
 
 
 class KernelCompilationError(RuntimeError):
-    """Recoverable compile failure; no FFN launch has happened."""
+    """功能：封装编译阶段失败，使外层搜索可记录失败并尝试其他候选
+
+    输入：编译异常的类型及消息字符串，原异常通过异常链保留
+    输出：可捕获的RuntimeError异常；此时尚未下发FFN主体，但可能已执行输入准备
+    """
 
 
 @dataclass
 class PreparedFFN:
+    """功能：持有已准备的输入、缓冲和编译产物，支持重复下发同一FFN
+
+    输入：由prepare_ffn创建，plan须与storage、tensors和artifact一致
+    storage依次为X[mp,kp]、W1[hp,kp]、W2[np,hp]、hidden[mp,hp]、输出[mp,np]及scratch
+    前五项为同一NPU上的FP16/BF16 Tensor，scratch为FP32，tensors为对应DSL视图
+    provenance/preparation分别记录来源及准备耗时，stream为准备时的执行流
+    输出：run()每次下发一个FFN主体Kernel，返回原前导维加N的同dtype输出view
+    输出与内部缓冲共享存储，下次run()会覆盖；须在原stream串行调用，不保证返回时设备已完成
+    """
+
     plan: object
     storage: tuple
     tensors: tuple
@@ -52,7 +66,7 @@ def prepare_ffn(x, weight1, weight2, *, up_impl='basic', down_impl='basic',
         raise RuntimeError('Expected two AIVs per AIC')
     from catlass.tla.runtime import from_dlpack
     import catlass.tla as tla
-    from ops.kernel.ffn import compile_kernel
+    from ops.host.dispatch import compile_kernel
     with torch.npu.device(x.device):
         stream = torch.npu.current_stream()
         start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
